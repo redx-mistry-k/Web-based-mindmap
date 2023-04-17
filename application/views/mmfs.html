@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+   <body>
+      <script src="https://unpkg.com/gojs@2.2.19/release/go.js"></script>
+      <div id="allSampleContent" class="p-4 w-full">
+      <script id="code">
+         function init() {
+         
+           // Since 2.2 you can also author concise templates with method chaining instead of GraphObject.make
+           // For details, see https://gojs.net/latest/intro/buildingObjects.html
+           const $ = go.GraphObject.make;
+         
+           myMindmap =
+             $(go.Diagram, "myMindmapDiv",
+               {
+                 // when the user drags a node, also move/copy/delete the whole subtree starting with that node
+                 "commandHandler.copiesTree": true,
+                 "commandHandler.copiesParentKey": true,
+                 "commandHandler.deletesTree": true,
+                 "draggingTool.dragsTree": true,
+                 "undoManager.isEnabled": true
+               });
+         
+           
+         
+           // a node consists of some text with a line shape underneath
+           myMindmap.nodeTemplate =
+             $(go.Node, "Vertical",
+               { selectionObjectName: "TEXT" },
+               $(go.TextBlock,
+                 {
+                   name: "TEXT",
+                   minSize: new go.Size(30, 15),
+                   editable: true
+                 },
+                 // remember not only the text string but the scale and the font in the node data
+                 new go.Binding("text", "text").makeTwoWay(),
+                 new go.Binding("scale", "scale").makeTwoWay(),
+                 new go.Binding("font", "font").makeTwoWay()),
+               $(go.Shape, "LineH",
+                 {
+                   stretch: go.GraphObject.Horizontal,
+                   strokeWidth: 3, height: 3,
+                   // this line shape is the port -- what links connect with
+                   portId: "", fromSpot: go.Spot.LeftRightSides, toSpot: go.Spot.LeftRightSides
+                 },
+                 new go.Binding("stroke", "brush"),
+                 // make sure links come in from the proper direction and go out appropriately
+                 new go.Binding("fromSpot", "dir", d => spotConverter(d, true)),
+                 new go.Binding("toSpot", "dir", d => spotConverter(d, false))),
+               // remember the locations of each node in the node data
+               new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+               // make sure text "grows" in the desired direction
+               new go.Binding("locationSpot", "dir", d => spotConverter(d, false))
+             );
+         
+             // when the document is modified, add a "*" to the title and enable the "Save" button
+           myMindmap.addDiagramListener("Modified", e => {
+             var button = document.getElementById("SaveButton");
+             if (button) button.disabled = !myMindmap.isModified;
+             var idx = document.title.indexOf("*");
+             if (myMindmap.isModified) {
+               if (idx < 0) document.title += "*";
+             } else {
+               if (idx >= 0) document.title = document.title.slice(0, idx);
+             }
+           });
+           // selected nodes show a button for adding children
+           myMindmap.nodeTemplate.selectionAdornmentTemplate =
+             $(go.Adornment, "Spot",
+               $(go.Panel, "Auto",
+                 // this Adornment has a rectangular blue Shape around the selected node
+                 $(go.Shape, { fill: null, stroke: "dodgerblue", strokeWidth: 3 }),
+                 $(go.Placeholder, { margin: new go.Margin(4, 4, 0, 4) })
+               ),
+               // and this Adornment has a Button to the right of the selected node
+               $("Button",
+                 {
+                   alignment: go.Spot.Right,
+                   alignmentFocus: go.Spot.Left,
+                   click: addNodeAndLink  // define click behavior for this Button in the Adornment
+                 },
+                 $(go.TextBlock, "+",  // the Button content
+                   { font: "bold 8pt sans-serif" })
+               )
+             );
+         
+           // the context menu allows users to change the font size and weight,
+           // and to perform a limited tree layout starting at that node
+           myMindmap.nodeTemplate.contextMenu =
+             $("ContextMenu",
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Bigger"),
+                 { click: (e, obj) => changeTextSize(obj, 1.1) }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Smaller"),
+                 { click: (e, obj) => changeTextSize(obj, 1 / 1.1) }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Bold/Normal"),
+                 { click: (e, obj) => toggleTextWeight(obj) }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Copy"),
+                 { click: (e, obj) => e.diagram.commandHandler.copySelection() }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Delete"),
+                 { click: (e, obj) => e.diagram.commandHandler.deleteSelection() }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Undo"),
+                 { click: (e, obj) => e.diagram.commandHandler.undo() }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Redo"),
+                 { click: (e, obj) => e.diagram.commandHandler.redo() }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Layout"),
+                 {
+                   click: (e, obj) => {
+                     var adorn = obj.part;
+                     adorn.diagram.startTransaction("Subtree Layout");
+                     layoutTree(adorn.adornedPart);
+                     adorn.diagram.commitTransaction("Subtree Layout");
+                   }
+                 }
+               )
+             );
+         
+           // a link is just a Bezier-curved line of the same color as the node to which it is connected
+           myMindmap.linkTemplate =
+             $(go.Link,
+               {
+                 curve: go.Link.Bezier,
+                 fromShortLength: -2,
+                 toShortLength: -2,
+                 selectable: false
+               },
+               $(go.Shape,
+                 { strokeWidth: 3 },
+                 new go.Binding("stroke", "toNode", n => {
+                   if (n.data.brush) return n.data.brush;
+                   return "black";
+                 }).ofObject())
+             );
+         
+           // the Diagram's context menu just displays commands for general functionality
+           myMindmap.contextMenu =
+             $("ContextMenu",
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Paste"),
+                 { click: (e, obj) => e.diagram.commandHandler.pasteSelection(e.diagram.toolManager.contextMenuTool.mouseDownPoint) },
+                 new go.Binding("visible", "", o => o.diagram && o.diagram.commandHandler.canPasteSelection(o.diagram.toolManager.contextMenuTool.mouseDownPoint)).ofObject()),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Undo"),
+                 { click: (e, obj) => e.diagram.commandHandler.undo() },
+                 new go.Binding("visible", "", o => o.diagram && o.diagram.commandHandler.canUndo()).ofObject()),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Redo"),
+                 { click: (e, obj) => e.diagram.commandHandler.redo() },
+                 new go.Binding("visible", "", o => o.diagram && o.diagram.commandHandler.canRedo()).ofObject()),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Save"),
+                 { click: (e, obj) => save() }),
+               $("ContextMenuButton",
+                 $(go.TextBlock, "Load"),
+                 { click: (e, obj) => load() })
+             );
+         
+           myMindmap.addDiagramListener("SelectionMoved", e => {
+             var rootX = myMindmap.findNodeForKey(0).location.x;
+             myMindmap.selection.each(node => {
+               if (node.data.parent !== 0) return; // Only consider nodes connected to the root
+               var nodeX = node.location.x;
+               if (rootX < nodeX && node.data.dir !== "right") {
+                 updateNodeDirection(node, "right");
+               } else if (rootX > nodeX && node.data.dir !== "left") {
+                 updateNodeDirection(node, "left");
+               }
+               layoutTree(node);
+             });
+           });
+         
+		  document.getElementById("blobButton").addEventListener("click", makeBlob);
+           // read in the predefined graph using the JSON format data held in the "mySavedModel" textarea
+           load();
+         }
+         
+         function spotConverter(dir, from) {
+           if (dir === "left") {
+             return (from ? go.Spot.Left : go.Spot.Right);
+           } else {
+             return (from ? go.Spot.Right : go.Spot.Left);
+           }
+         }
+         
+         function changeTextSize(obj, factor) {
+           var adorn = obj.part;
+           adorn.diagram.startTransaction("Change Text Size");
+           var node = adorn.adornedPart;
+           var tb = node.findObject("TEXT");
+           tb.scale *= factor;
+           adorn.diagram.commitTransaction("Change Text Size");
+         }
+         
+         function toggleTextWeight(obj) {
+           var adorn = obj.part;
+           adorn.diagram.startTransaction("Change Text Weight");
+           var node = adorn.adornedPart;
+           var tb = node.findObject("TEXT");
+           // assume "bold" is at the start of the font specifier
+           var idx = tb.font.indexOf("bold");
+           if (idx < 0) {
+             tb.font = "bold " + tb.font;
+           } else {
+             tb.font = tb.font.slice(idx + 5);
+           }
+           adorn.diagram.commitTransaction("Change Text Weight");
+         }
+         
+         function updateNodeDirection(node, dir) {
+           myMindmap.model.setDataProperty(node.data, "dir", dir);
+           // recursively update the direction of the child nodes
+           var chl = node.findTreeChildrenNodes(); // gives us an iterator of the child nodes related to this particular node
+           while (chl.next()) {
+             updateNodeDirection(chl.value, dir);
+           }
+         }
+         
+         function addNodeAndLink(e, obj) {
+           var adorn = obj.part;
+           var diagram = adorn.diagram;
+           diagram.startTransaction("Add Node");
+           var oldnode = adorn.adornedPart;
+           var olddata = oldnode.data;
+           // copy the brush and direction to the new node data
+           var newdata = { text: "idea", brush: olddata.brush, dir: olddata.dir, parent: olddata.key };
+           diagram.model.addNodeData(newdata);
+           layoutTree(oldnode);
+           diagram.commitTransaction("Add Node");
+         
+           // if the new node is off-screen, scroll the diagram to show the new node
+           var newnode = diagram.findNodeForData(newdata);
+           if (newnode !== null) diagram.scrollToRect(newnode.actualBounds);
+         }
+         
+         function layoutTree(node) {
+           if (node.data.key === 0) {  // adding to the root?
+             layoutAll();  // lay out everything
+           } else {  // otherwise lay out only the subtree starting at this parent node
+             var parts = node.findTreeParts();
+             layoutAngle(parts, node.data.dir === "left" ? 180 : 0);
+           }
+         }
+         
+         function layoutAngle(parts, angle) {
+           var layout = go.GraphObject.make(go.TreeLayout,
+             {
+               angle: angle,
+               arrangement: go.TreeLayout.ArrangementFixedRoots,
+               nodeSpacing: 5,
+               layerSpacing: 20,
+               setsPortSpot: false, // don't set port spots since we're managing them with our spotConverter function
+               setsChildPortSpot: false
+             });
+           layout.doLayout(parts);
+         }
+         
+         function layoutAll() {
+           var root = myMindmap.findNodeForKey(0);
+           if (root === null) return;
+           myMindmap.startTransaction("Layout");
+           // split the nodes and links into two collections
+           var rightward = new go.Set(/*go.Part*/);
+           var leftward = new go.Set(/*go.Part*/);
+           root.findLinksConnected().each(link => {
+             var child = link.toNode;
+             if (child.data.dir === "left") {
+               leftward.add(root);  // the root node is in both collections
+               leftward.add(link);
+               leftward.addAll(child.findTreeParts());
+             } else {
+               rightward.add(root);  // the root node is in both collections
+               rightward.add(link);
+               rightward.addAll(child.findTreeParts());
+             }
+           });
+           // do one layout and then the other without moving the shared root node
+           layoutAngle(rightward, 0);
+           layoutAngle(leftward, 180);
+           myMindmap.commitTransaction("Layout");
+         }
+         
+         // Show the diagram's model in JSON format
+         function save() {
+           document.getElementById("mySavedModel").value = myMindmap.model.toJson();
+           myMindmap.isModified = false;
+         }
+         function load() {
+           myMindmap.model = go.Model.fromJson(document.getElementById("mySavedModel").value);
+         }
+         window.addEventListener('DOMContentLoaded', init);
+		 
+ function myCallback(blob) {
+      var url = window.URL.createObjectURL(blob);
+      var filename = "myBlobFile.png";
+
+      var a = document.createElement("a");
+      a.style = "display: none";
+      a.href = url;
+      a.download = filename;
+
+      // IE 11
+      if (window.navigator.msSaveBlob !== undefined) {
+        window.navigator.msSaveBlob(blob, filename);
+        return;
+      }
+
+      document.body.appendChild(a);
+      requestAnimationFrame(() => {
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      });
+    }
+	function myCallback(blob) {
+      var url = window.URL.createObjectURL(blob);
+      var filename = "mySVGFile.svg";
+
+      var a = document.createElement("a");
+      a.style = "display: none";
+      a.href = url;
+      a.download = filename;
+
+      // IE 11
+      if (window.navigator.msSaveBlob !== undefined) {
+        window.navigator.msSaveBlob(blob, filename);
+        return;
+      }
+
+      document.body.appendChild(a);
+      requestAnimationFrame(() => {
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      });
+    }
+
+    function makeSvg() {
+      var svg = myMindmap.makeSvg({ scale: 1, background: "white" });
+      var svgstr = new XMLSerializer().serializeToString(svg);
+      var blob = new Blob([svgstr], { type: "image/svg+xml" });
+      myCallback(blob);
+    }
+	
+		 function makeBlob() {
+		  var blob = myMindmap.makeImageData({ background: "white", returnType: "blob", callback: myCallback });
+		}
+		 
+      </script>
+      <div id="sample">
+         <div id="myMindmapDiv" style="border: 1px solid black; width: 100%; height: 1548px; position: relative; -webkit-tap-highlight-color: rgba(255, 255, 255, 0);">
+            <canvas tabindex="0" width="1548" height="1548" style="position: absolute; top: 0px; left: 0px; z-index: 2; user-select: none; touch-action: none; width: 1239px; height: 298px;">This text is displayed if your browser does not support the Canvas HTML element.</canvas>
+            <div style="position: absolute; overflow: auto; width: 1239px; height: 298px; z-index: 1;">
+               <div style="position: absolute; width: 1px; height: 1px;"></div>
+            </div>
+         </div>
+         <button id="blobButton" >Image</button>
+         <button onclick="makeSvg()" >SVG</button>
+         <!--<button onclick="load()">Load</button>
+         <button onclick="layoutAll()">Layout</button>
+         Diagram Model saved in JSON format:
+         <br>-->
+         <textarea id="mySavedModel" style="width:100%;height:400px;display:none" spellcheck="false" >
+          { "class": "TreeModel",
+  "nodeDataArray": [
+{"key":0,"text":"Maths","loc":"448.801867042907 55.94639596989259"},
+{"key":1,"parent":0,"text":"Maths AS","brush":"skyblue","dir":"right","loc":"795.046016635061 -177.04366099491313"},
+{"text":"Pure","brush":"skyblue","dir":"right","parent":1,"key":-3,"loc":"871.400508822561 -469.5436609949129"},
+{"text":"Statistics ","brush":"skyblue","dir":"right","parent":1,"key":-4,"loc":"871.400508822561 -66.54366099491313"},
+{"text":"Mechanics","brush":"skyblue","dir":"right","parent":1,"key":-5,"loc":"871.400508822561 115.45633900508687"},
+{"text":"Maths A2","dir":"right","parent":0,"key":-6,"loc":"808.2370519320502 964.5693738428434","brush":"#D6E329"},
+{"text":"F Maths AS","parent":0,"key":-7,"dir":"left","loc":"260.815129918185 -61.59578284679259","brush":"#198A8A"},
+{"text":"F Maths A2","parent":0,"key":-8,"dir":"left","loc":"190.2664989660069 637.90734703421","brush":"#B6217B"},
+{"text":"Pure","brush":"#D6E329","dir":"right","parent":-6,"key":-9,"loc":"883.1506261508002 613.5693738428434"},
+{"text":"Statistics ","brush":"#D6E329","dir":"right","parent":-6,"key":-10,"loc":"883.1506261508002 1127.0693738428436"},
+{"text":"Mechanics","brush":"#D6E329","dir":"right","parent":-6,"key":-11,"loc":"883.1506261508002 1315.5693738428436"},
+{"text":"Pure","brush":"#198A8A","dir":"left","parent":-7,"key":-12,"loc":"172.907903355685 -222.9783220080372"},
+{"text":"Statistics ","brush":"#198A8A","dir":"left","parent":-7,"key":-13,"loc":"172.907903355685 -30.29107571679799"},
+{"text":"Mechanics","brush":"#198A8A","dir":"left","parent":-7,"key":-14,"loc":"172.907903355685 99.78675631445202"},
+{"text":"Pure","brush":"#B6217B","dir":"left","parent":-8,"key":-15,"loc":"103.8001903722569 423.40734703421003"},
+{"text":"Statistics","brush":"#B6217B","dir":"left","parent":-8,"key":-16,"loc":"103.8001903722569 715.90734703421"},
+{"text":"Mechanics","brush":"#B6217B","dir":"left","parent":-8,"key":-17,"loc":"103.8001903722569 852.40734703421"},
+{"text":"M AS U1","brush":"skyblue","dir":"right","parent":-3,"key":-18,"loc":"921.400508822561 -469.5436609949129"},
+{"text":"M AS U2A","brush":"skyblue","dir":"right","parent":-4,"key":-19,"loc":"943.413204135061 -66.54366099491313"},
+{"text":"M AS U2B","brush":"skyblue","dir":"right","parent":-5,"key":-20,"loc":"953.537715853811 115.45633900508687"},
+{"text":"M A2 U3","brush":"#D6E329","dir":"right","parent":-9,"key":-21,"loc":"933.1506261508002 613.5693738428434"},
+{"text":"M A2 U4A","brush":"#D6E329","dir":"right","parent":-10,"key":-22,"loc":"955.1633214633002 1127.0693738428436"},
+{"text":"M AS U4B","brush":"#D6E329","dir":"right","parent":-11,"key":-23,"loc":"965.2878331820502 1315.5693738428436"},
+{"text":"FM AS U1","brush":"#198A8A","dir":"left","parent":-12,"key":-24,"loc":"122.907903355685 -222.9783220080372"},
+{"text":"FM AS U2","brush":"#198A8A","dir":"left","parent":-13,"key":-25,"loc":"100.895208043185 -30.29107571679799"},
+{"text":"FM AS U3","brush":"#198A8A","dir":"left","parent":-14,"key":-26,"loc":"90.770696324435 99.78675631445202"},
+{"text":"FM AS U4","brush":"#B6217B","dir":"left","parent":-15,"key":-27,"loc":"53.80019037225691 423.40734703421003"},
+{"text":"FM AS U5","brush":"#B6217B","dir":"left","parent":-16,"key":-28,"loc":"31.787495059756907 715.90734703421"},
+{"text":"FM AS U6","brush":"#B6217B","dir":"left","parent":-17,"key":-29,"loc":"21.662983341006907 852.40734703421"},
+{"text":"M2.1.1 Proof ","brush":"skyblue","dir":"right","parent":-18,"key":-30,"loc":"993.413204135061 -755.5436609949131"},
+{"text":"M2.1.2 Algebra and Functions ","brush":"skyblue","dir":"right","parent":-18,"key":-31,"loc":"993.413204135061 -677.5436609949131"},
+{"text":"M2.1.3 Coordinate geometry in the (x, y) plane","brush":"skyblue","dir":"right","parent":-18,"key":-32,"loc":"993.413204135061 -586.5436609949131"},
+{"text":"M2.1.4 Sequences and Series - The Binomial Theorem","brush":"skyblue","dir":"right","parent":-18,"key":-33,"loc":"993.413204135061 -547.5436609949131"},
+{"text":"M2.1.5 Trigonometry","brush":"skyblue","dir":"right","parent":-18,"key":-34,"loc":"993.413204135061 -482.543660994913"},
+{"text":"M2.1.6 Exponentials and logarithms","brush":"skyblue","dir":"right","parent":-18,"key":-35,"loc":"993.413204135061 -404.5436609949131"},
+{"text":"M2.1.7 Differentiation","brush":"skyblue","dir":"right","parent":-18,"key":-36,"loc":"993.413204135061 -326.5436609949131"},
+{"text":"M2.1.8 Integration","brush":"skyblue","dir":"right","parent":-18,"key":-37,"loc":"993.413204135061 -235.54366099491307"},
+{"text":"M2.1.1a Proof - basics","brush":"skyblue","dir":"right","parent":-30,"key":-38,"loc":"1087.839473666311 -755.5436609949131"},
+{"text":"M2.1.8a Fundamental Theorem of Calculus","brush":"skyblue","dir":"right","parent":-37,"key":-39,"loc":"1118.200313510061 -261.5436609949131"},
+{"text":"M2.1.7a Differentiation from First Principles","brush":"skyblue","dir":"right","parent":-36,"key":-40,"loc":"1136.741817416311 -365.5436609949131"},
+{"text":"M2.1.7b Polynomial Differentiation","brush":"skyblue","dir":"right","parent":-36,"key":-41,"loc":"1136.741817416311 -339.5436609949131"},
+{"text":"M2.1.7c Tangents & Normals","brush":"skyblue","dir":"right","parent":-36,"key":-42,"loc":"1136.741817416311 -313.5436609949131"},
+{"text":"M2.1.6a Exponentials","brush":"skyblue","dir":"right","parent":-35,"key":-43,"loc":"1220.086543978811 -417.5436609949131"},
+{"text":"M2.1.6b Logarithms","brush":"skyblue","dir":"right","parent":-35,"key":-44,"loc":"1220.086543978811 -391.5436609949131"},
+{"text":"M2.1.5a Trigonometric values","brush":"skyblue","dir":"right","parent":-34,"key":-47,"loc":"1132.863399447561 -521.5436609949132"},
+{"text":"M2.1.5b Sin & cosine rules","brush":"skyblue","dir":"right","parent":-34,"key":-48,"loc":"1132.863399447561 -495.54366099491307"},
+{"text":"M2.1.3a Geometry of lines","brush":"skyblue","dir":"right","parent":-32,"key":-51,"loc":"1281.493770541311 -599.5436609949131"},
+{"text":"M2.1.3b Geometry of circles","brush":"skyblue","dir":"right","parent":-32,"key":-52,"loc":"1281.493770541311 -573.5436609949131"},
+{"text":"M2.1.2a Indices & Surds","brush":"skyblue","dir":"right","parent":-31,"key":-56,"loc":"1186.850215853811 -729.5436609949131"},
+{"text":"M2.1.2b Quadratic & Simultaneous Equations","brush":"skyblue","dir":"right","parent":-31,"key":-57,"loc":"1186.850215853811 -703.5436609949131"},
+{"text":"M2.1.2c Inequalities","brush":"skyblue","dir":"right","parent":-31,"key":-58,"loc":"1186.850215853811 -677.5436609949131"},
+{"text":"M2.1.2d Polynomials","brush":"skyblue","dir":"right","parent":-31,"key":-59,"loc":"1186.850215853811 -651.5436609949131"},
+{"text":"M2.1.7d Stationary Points","brush":"skyblue","dir":"right","parent":-36,"key":-60,"loc":"1136.741817416311 -287.5436609949131"},
+{"text":"M2.1.8b Basic Integration","brush":"skyblue","dir":"right","parent":-37,"key":-61,"loc":"1118.200313510061 -235.54366099491307"},
+{"text":"M2.1.9 Vectors","brush":"skyblue","dir":"right","parent":-18,"key":-62,"loc":"993.413204135061 -183.54366099491313"},
+{"text":"M2.1.9a Vectors basics","brush":"skyblue","dir":"right","parent":-62,"key":-63,"loc":"1100.122188510061 -183.54366099491313"},
+{"text":"M2.1.8c Definite Integrals & area","brush":"skyblue","dir":"right","parent":-37,"key":-64,"loc":"1118.200313510061 -209.54366099491313"},
+{"text":"M2.1.4a Binomial for natural n","brush":"skyblue","dir":"right","parent":-33,"key":-65,"loc":"1330.630977572561 -547.5436609949131"},
+{"text":"M2.1.5c Trigonometric graphs","brush":"skyblue","dir":"right","parent":-34,"key":-66,"loc":"1132.863399447561 -469.5436609949129"},
+{"text":"M2.1.5d Trigonometric equations","brush":"skyblue","dir":"right","parent":-34,"key":-67,"loc":"1132.863399447561 -443.5436609949131"},
+{"text":"M2.1.2e Graphs & Graph Transformations","brush":"skyblue","dir":"right","parent":-31,"key":-68,"loc":"1186.850215853811 -625.5436609949131"},
+{"text":"M2.2.1 Statistical Sampling","brush":"skyblue","dir":"right","parent":-19,"key":-69,"loc":"1024.096797885061 -157.54366099491313"},
+{"text":"M2.2.2 Data presentation and interpretation","brush":"skyblue","dir":"right","parent":-19,"key":-70,"loc":"1024.096797885061 -118.54366099491313"},
+{"text":"M2.2.3 Probability","brush":"skyblue","dir":"right","parent":-19,"key":-71,"loc":"1024.096797885061 -79.54366099491313"},
+{"text":"M2.2.4 Statistical distributions","brush":"skyblue","dir":"right","parent":-19,"key":-72,"loc":"1024.096797885061 -27.543660994913125"},
+{"text":"M2.2.5 Statistical hypothesis testing","brush":"skyblue","dir":"right","parent":-19,"key":-73,"loc":"1024.096797885061 24.456339005086875"},
+{"text":"M2.2.5a Statistical hypothesis testing","brush":"skyblue","dir":"right","parent":-73,"key":-75,"loc":"1250.757442416311 24.456339005086875"},
+{"text":"M2.2.1a Sampling - introduction & critiquing","brush":"skyblue","dir":"right","parent":-69,"key":-76,"loc":"1200.890254916311 -157.54366099491313"},
+{"text":"M2.2.2a Statistical Diagrams","brush":"skyblue","dir":"right","parent":-70,"key":-77,"loc":"1294.867305697561 -131.54366099491313"},
+{"text":"M2.2.2b Measures of Central Tendency & Variation","brush":"skyblue","dir":"right","parent":-70,"key":-78,"loc":"1294.867305697561 -105.54366099491313"},
+{"text":"M2.2.3a Basic Probability","brush":"skyblue","dir":"right","parent":-71,"key":-74,"loc":"1148.147579135061 -79.54366099491313"},
+{"text":"M2.2.4a Discrete Probability Distributions","brush":"skyblue","dir":"right","parent":-72,"key":-79,"loc":"1216.061153353811 -53.543660994913125"},
+{"text":"M2.2.4b Calculating Probabilites using Discrete Probability Distributions","brush":"skyblue","dir":"right","parent":-72,"key":-80,"loc":"1216.061153353811 -27.543660994913125"},
+{"text":"M2.2.4c Selecting an appropriate Discrete Probability Distribution","brush":"skyblue","dir":"right","parent":-72,"key":-81,"loc":"1216.061153353811 -1.5436609949131253"},
+{"text":"M2.2.6 Quantities and units in mechanics","brush":"skyblue","dir":"right","parent":-20,"key":-82,"loc":"1034.221309603811 50.456339005086875"},
+{"text":"M2.2.7 Kinematics","brush":"skyblue","dir":"right","parent":-20,"key":-83,"loc":"1034.221309603811 102.45633900508687"},
+{"text":"M2.2.8 Forces and Newton\u2019s laws","brush":"skyblue","dir":"right","parent":-20,"key":-84,"loc":"1034.221309603811 154.45633900508687"},
+{"text":"M2.2.9 Vectors","brush":"skyblue","dir":"right","parent":-20,"key":-85,"loc":"1034.221309603811 180.45633900508687"},
+{"text":"M2.2.6a Quantities and units in mechanics","brush":"skyblue","dir":"right","parent":-82,"key":-86,"loc":"1291.960079135061 50.456339005086875"},
+{"text":"M2.2.7a Language and Graphs","brush":"skyblue","dir":"right","parent":-83,"key":-87,"loc":"1161.153926791311 76.45633900508687"},
+{"text":"M2.2.7b Constant acceleration formul\u00e6","brush":"skyblue","dir":"right","parent":-83,"key":-88,"loc":"1161.153926791311 102.45633900508687"},
+{"text":"M2.2.7c Calculus for Motion in a Straight Line","brush":"skyblue","dir":"right","parent":-83,"key":-89,"loc":"1161.153926791311 128.45633900508687"},
+{"text":"M2.2.8a Forces and Newton\u2019s laws - basics","brush":"skyblue","dir":"right","parent":-84,"key":-90,"loc":"1249.068965853811 154.45633900508687"},
+{"text":"M2.2.9a Basic vector mechanics","brush":"skyblue","dir":"right","parent":-85,"key":-91,"loc":"1140.930293978811 180.45633900508687"},
+{"text":"M2.3.1 Proof","brush":"#D6E329","dir":"right","parent":-21,"key":-92,"loc":"1003.7224034945502 223.56937384284345"},
+{"text":"M2.3.2 Algebra and Functions","brush":"#D6E329","dir":"right","parent":-21,"key":-93,"loc":"1003.7224034945502 327.56937384284345"},
+{"text":"iM2.3.3 Coordinate geometry in the (x, y) planedea","brush":"#D6E329","dir":"right","parent":-21,"key":-94,"loc":"1003.7224034945502 431.56937384284345"},
+{"text":"M2.3.4 Sequences and Series","brush":"#D6E329","dir":"right","parent":-21,"key":-95,"loc":"1003.7224034945502 496.56937384284345"},
+{"text":"M2.3.5 Trigonometry","brush":"#D6E329","dir":"right","parent":-21,"key":-96,"loc":"1003.7224034945502 600.5693738428434"},
+{"text":"M2.3.6 Differentiation","brush":"#D6E329","dir":"right","parent":-21,"key":-97,"loc":"1003.7224034945502 730.5693738428434"},
+{"text":"M2.3.7 Integration","brush":"#D6E329","dir":"right","parent":-21,"key":-98,"loc":"1003.7224034945502 886.5693738428434"},
+{"text":"M2.3.8 Numerical Methods","brush":"#D6E329","dir":"right","parent":-21,"key":-99,"loc":"1003.7224034945502 1003.5693738428434"},
+{"text":"M2.4.1 Probability","brush":"#D6E329","dir":"right","parent":-22,"key":-100,"loc":"1034.4059972445502 1068.5693738428436"},
+{"text":"M2.4.2 Statistical distributions","brush":"#D6E329","dir":"right","parent":-22,"key":-101,"loc":"1034.4059972445502 1133.5693738428436"},
+{"text":"M2.4.3 Statistical hypothesis testing","brush":"#D6E329","dir":"right","parent":-22,"key":-102,"loc":"1034.4059972445502 1185.5693738428436"},
+{"text":"M2.4.4 Trigonometry","brush":"#D6E329","dir":"right","parent":-23,"key":-103,"loc":"1045.9714269320502 1211.5693738428436"},
+{"text":"M2.4.5 Differentiation","brush":"#D6E329","dir":"right","parent":-23,"key":-104,"loc":"1045.9714269320502 1237.5693738428436"},
+{"text":"M2.4.6 Integration","brush":"#D6E329","dir":"right","parent":-23,"key":-105,"loc":"1045.9714269320502 1263.5693738428436"},
+{"text":"M2.4.7 Quantities and units in mechanics","brush":"#D6E329","dir":"right","parent":-23,"key":-106,"loc":"1045.9714269320502 1289.5693738428436"},
+{"text":"M2.4.8 Kinematics","brush":"#D6E329","dir":"right","parent":-23,"key":-107,"loc":"1045.9714269320502 1328.5693738428436"},
+{"text":"M2.4.9 Forces and Newton\u2019s laws","brush":"#D6E329","dir":"right","parent":-23,"key":-108,"loc":"1045.9714269320502 1367.5693738428436"},
+{"text":"M2.4.10 Moments","brush":"#D6E329","dir":"right","parent":-23,"key":-109,"loc":"1045.9714269320502 1393.5693738428436"},
+{"text":"M2.4.11 Vectors","brush":"#D6E329","dir":"right","parent":-23,"key":-110,"loc":"1045.9714269320502 1419.5693738428436"},
+{"text":"M2.3.1a Proof by Contradiction","brush":"#D6E329","dir":"right","parent":-92,"key":-111,"loc":"1098.1486730258002 223.56937384284345"},
+{"text":"M2.3.2a Simplify Rational Expressions","brush":"#D6E329","dir":"right","parent":-93,"key":-112,"loc":"1197.1594152133002 249.56937384284345"},
+{"text":"M2.3.2b Modulus Function","brush":"#D6E329","dir":"right","parent":-93,"key":-113,"loc":"1197.1594152133002 275.56937384284345"},
+{"text":"M2.3.2c The Language of Functions","brush":"#D6E329","dir":"right","parent":-93,"key":-114,"loc":"1197.1594152133002 301.56937384284345"},
+{"text":"M2.3.2d Combinations of Transformations","brush":"#D6E329","dir":"right","parent":-93,"key":-115,"loc":"1197.1594152133002 327.56937384284345"},
+{"text":"M2.3.2d Combinations of Transformations","brush":"#D6E329","dir":"right","parent":-93,"key":-116,"loc":"1197.1594152133002 353.56937384284345"},
+{"text":"M2.3.2e Partial Fractions","brush":"#D6E329","dir":"right","parent":-93,"key":-117,"loc":"1197.1594152133002 379.56937384284345"},
+{"text":"M2.3.3a Parametric Equations","brush":"#D6E329","dir":"right","parent":-94,"key":-118,"loc":"1316.3810949008002 431.56937384284345"},
+{"text":"M2.3.2f Functions in Modelling","brush":"#D6E329","dir":"right","parent":-93,"key":-119,"loc":"1197.1594152133002 405.56937384284345"},
+{"text":"M2.3.4a Binomial expansion for any rational n","brush":"#D6E329","dir":"right","parent":-95,"key":-120,"loc":"1197.8893956820502 457.56937384284345"},
+{"text":"M2.3.4b Arithmetic Series","brush":"#D6E329","dir":"right","parent":-95,"key":-121,"loc":"1197.8893956820502 483.56937384284345"},
+{"text":"M2.3.4c Geometric Series","brush":"#D6E329","dir":"right","parent":-95,"key":-122,"loc":"1197.8893956820502 509.56937384284345"},
+{"text":"M2.3.4d Series in Modelling","brush":"#D6E329","dir":"right","parent":-95,"key":-123,"loc":"1197.8893956820502 535.5693738428434"},
+{"text":"M2.3.5a Radians","brush":"#D6E329","dir":"right","parent":-96,"key":-124,"loc":"1143.1725988070502 561.5693738428434"},
+{"text":"M2.3.5b Trigonometric functions, inverse, identities and equations","brush":"#D6E329","dir":"right","parent":-96,"key":-125,"loc":"1143.1725988070502 587.5693738428434"},
+{"text":"M2.3.5c Compound angle formulae","brush":"#D6E329","dir":"right","parent":-96,"key":-126,"loc":"1143.1725988070502 613.5693738428434"},
+{"text":"M2.3.5b Trigonometric functions, inverse, identities and equations","brush":"#D6E329","dir":"right","parent":-96,"key":-127,"loc":"1143.1725988070502 639.5693738428434"},
+{"text":"M2.3.6a Points of Inflection","brush":"#D6E329","dir":"right","parent":-97,"key":-128,"loc":"1147.0510167758002 665.5693738428434"},
+{"text":"M2.3.6b The chain, product & quotient Rule","brush":"#D6E329","dir":"right","parent":-97,"key":-129,"loc":"1147.0510167758002 691.5693738428434"},
+{"text":"M2.3.6c Differentiation of standard functions","brush":"#D6E329","dir":"right","parent":-97,"key":-130,"loc":"1147.0510167758002 717.5693738428434"},
+{"text":"M2.3.6d Implicit Differentiation","brush":"#D6E329","dir":"right","parent":-97,"key":-131,"loc":"1147.0510167758002 743.5693738428434"},
+{"text":"M2.3.6e Parametric Differentiation","brush":"#D6E329","dir":"right","parent":-97,"key":-132,"loc":"1147.0510167758002 769.5693738428434"},
+{"text":"M2.3.6f Differential Equations","brush":"#D6E329","dir":"right","parent":-97,"key":-133,"loc":"1147.0510167758002 795.5693738428434"},
+{"text":"M2.3.7a Integration of further functions","brush":"#D6E329","dir":"right","parent":-98,"key":-134,"loc":"1128.5095128695502 821.5693738428434"},
+{"text":"M2.3.7b Further Areas","brush":"#D6E329","dir":"right","parent":-98,"key":-135,"loc":"1128.5095128695502 847.5693738428434"},
+{"text":"M2.3.7c Integrals as limits","brush":"#D6E329","dir":"right","parent":-98,"key":-136,"loc":"1128.5095128695502 873.5693738428434"},
+{"text":"M2.3.7d Integration by Substitution & by Parts","brush":"#D6E329","dir":"right","parent":-98,"key":-137,"loc":"1128.5095128695502 899.5693738428434"},
+{"text":"M2.3.7e Using Partial Fractions","brush":"#D6E329","dir":"right","parent":-98,"key":-138,"loc":"1128.5095128695502 925.5693738428434"},
+{"text":"M2.3.7f Simple Differential Equations","brush":"#D6E329","dir":"right","parent":-98,"key":-139,"loc":"1128.5095128695502 951.5693738428434"},
+{"text":"M2.3.8a Roots of f(x)=0 and Sign Change Methods","brush":"#D6E329","dir":"right","parent":-99,"key":-140,"loc":"1179.0622472445502 977.5693738428434"},
+{"text":"M2.3.8b Iteration and Newton Raphson","brush":"#D6E329","dir":"right","parent":-99,"key":-141,"loc":"1179.0622472445502 1003.5693738428434"},
+{"text":"M2.3.8c Definite Integrals & the Trapezium Rule","brush":"#D6E329","dir":"right","parent":-99,"key":-142,"loc":"1179.0622472445502 1029.5693738428436"},
+{"text":"M2.4.1a Conditional Probability","brush":"#D6E329","dir":"right","parent":-100,"key":-143,"loc":"1158.4567784945502 1055.5693738428436"},
+{"text":"M2.4.1b Modelling with Probability","brush":"#D6E329","dir":"right","parent":-100,"key":-144,"loc":"1158.4567784945502 1081.5693738428436"},
+{"text":"M2.4.3a Further Statistical hypothesis testing","brush":"#D6E329","dir":"right","parent":-102,"key":-145,"loc":"1261.0666417758002 1185.5693738428436"},
+{"text":"M2.4.2a Understanding continuous probability distributions","brush":"#D6E329","dir":"right","parent":-101,"key":-146,"loc":"1226.3703527133002 1107.5693738428436"},
+{"text":"M2.4.2b Calculating probabilities of continuous probability distributions","brush":"#D6E329","dir":"right","parent":-101,"key":-147,"loc":"1226.3703527133002 1133.5693738428436"},
+{"text":"M2.4.2c Select appropriate probability distribution","brush":"#D6E329","dir":"right","parent":-101,"key":-148,"loc":"1226.3703527133002 1159.5693738428436"},
+{"text":"M2.4.4a Trigonometry in mechanics","brush":"#D6E329","dir":"right","parent":-103,"key":-149,"loc":"1185.4216222445502 1211.5693738428436"},
+{"text":"M2.4.5a Construct simple differential equations","brush":"#D6E329","dir":"right","parent":-104,"key":-150,"loc":"1189.3000402133002 1237.5693738428436"},
+{"text":"M2.4.6a Solve simple differential equations","brush":"#D6E329","dir":"right","parent":-105,"key":-151,"loc":"1170.7585363070502 1263.5693738428436"},
+{"text":"M2.4.7a Quantities and units - moments","brush":"#D6E329","dir":"right","parent":-106,"key":-152,"loc":"1303.7101964633002 1289.5693738428436"},
+{"text":"M2.4.8a Vector Kinematics","brush":"#D6E329","dir":"right","parent":-107,"key":-153,"loc":"1172.9040441195502 1315.5693738428436"},
+{"text":"M2.4.8b 2D-Kinematics Calculus","brush":"#D6E329","dir":"right","parent":-107,"key":-154,"loc":"1172.9040441195502 1341.5693738428436"},
+{"text":"M2.4.11a Vectors in 3-D","brush":"#D6E329","dir":"right","parent":-110,"key":-155,"loc":"1158.9455480258002 1419.5693738428436"},
+{"text":"M2.4.10a Moments","brush":"#D6E329","dir":"right","parent":-109,"key":-156,"loc":"1170.0158605258002 1393.5693738428436"},
+{"text":"M2.4.9a Resolving Forces  & Friction","brush":"#D6E329","dir":"right","parent":-108,"key":-157,"loc":"1260.8190831820502 1367.5693738428436"},
+{"text":"FM2.1.1 Proof","brush":"#198A8A","dir":"left","parent":-24,"key":-158,"loc":"42.954290074434994 -326.9783220080372"},
+{"text":"FM2.1.2 Complex Numbers","brush":"#198A8A","dir":"left","parent":-24,"key":-159,"loc":"42.954290074434994 -274.9783220080372"},
+{"text":"FM2.1.3 Matrices","brush":"#198A8A","dir":"left","parent":-24,"key":-160,"loc":"42.954290074434994 -209.9783220080372"},
+{"text":"FM2.1.4 Further Algebra and Functions","brush":"#198A8A","dir":"left","parent":-24,"key":-161,"loc":"42.954290074434994 -157.9783220080372"},
+{"text":"FM2.1.5 Further Vectors","brush":"#198A8A","dir":"left","parent":-24,"key":-162,"loc":"42.954290074434994 -118.9783220080372"},
+{"text":"FM2.2.1 Random Variables and the Poisson Process","brush":"#198A8A","dir":"left","parent":-25,"key":-163,"loc":"20.941594761934994 -62.79107571679799"},
+{"text":"FM2.2.2 Exploring relationships between variables and goodness of fit of a model","brush":"#198A8A","dir":"left","parent":-25,"key":-164,"loc":"20.941594761934994 2.208924283202009"},
+{"text":"FM2.3.1 Momentum and Impulse","brush":"#198A8A","dir":"left","parent":-26,"key":-165,"loc":"10.817083043184994 28.208924283202023"},
+{"text":"FM2.3.2 Hooke's Law, Work, Energy and Power","brush":"#198A8A","dir":"left","parent":-26,"key":-166,"loc":"10.817083043184994 54.20892428320202"},
+{"text":"FM2.3.3 Circular Motion","brush":"#198A8A","dir":"left","parent":-26,"key":-167,"loc":"10.817083043184994 112.78675631445202"},
+{"text":"FM2.3.4 Differentiation and Integration of Vectors","brush":"#198A8A","dir":"left","parent":-26,"key":-168,"loc":"10.817083043184994 171.36458834570203"},
+{"text":"FM2.1.1a Proof by Induction","brush":"#198A8A","dir":"left","parent":-158,"key":-169,"loc":"-59.412897425565006 -326.9783220080372"},
+{"text":"FM2.1.2a Complex numbers - Basic Concepts","brush":"#198A8A","dir":"left","parent":-159,"key":-170,"loc":"-135.984674769315 -300.9783220080372"},
+{"text":"FM2.1.2b Geometric interpretation of Complex Numbers","brush":"#198A8A","dir":"left","parent":-159,"key":-171,"loc":"-135.984674769315 -274.9783220080372"},
+{"text":"FM2.1.2c Loci and Transformations in the Argand Diagram","brush":"#198A8A","dir":"left","parent":-159,"key":-172,"loc":"-135.984674769315 -248.9783220080372"},
+{"text":"FM2.1.5a Further Vectors","brush":"#198A8A","dir":"left","parent":-162,"key":-173,"loc":"-117.208307581815 -118.9783220080372"},
+{"text":"FM2.1.3a Matrix manipulation","brush":"#198A8A","dir":"left","parent":-160,"key":-174,"loc":"-77.459284144315 -222.9783220080372"},
+{"text":"FM2.1.3b Matrix Transformations","brush":"#198A8A","dir":"left","parent":-160,"key":-175,"loc":"-77.459284144315 -196.9783220080372"},
+{"text":" FM2.1.4a Polynomials","brush":"#198A8A","dir":"left","parent":-161,"key":-176,"loc":"-203.936334925565 -170.9783220080372"},
+{"text":"FM2.1.4b Sums of Series","brush":"#198A8A","dir":"left","parent":-161,"key":-177,"loc":"-203.936334925565 -144.9783220080372"},
+{"text":"FM2.2.1a Mean and Variance of Independent Random Variables","brush":"#198A8A","dir":"left","parent":-163,"key":-178,"loc":"-303.752252894315 -101.79107571679799"},
+{"text":"FM2.2.1b Discrete Probability Distributions","brush":"#198A8A","dir":"left","parent":-163,"key":-179,"loc":"-303.752252894315 -75.79107571679799"},
+{"text":"FM2.2.1c Continuous Probability Distributions","brush":"#198A8A","dir":"left","parent":-163,"key":-180,"loc":"-303.752252894315 -49.79107571679799"},
+{"text":"FM2.2.1d Poisson and exponential distributions","brush":"#198A8A","dir":"left","parent":-163,"key":-181,"loc":"-303.752252894315 -23.79107571679799"},
+{"text":"FM2.2.2a Correlation & Goodness of fit","brush":"#198A8A","dir":"left","parent":-164,"key":-182,"loc":"-467.331354456815 2.208924283202009"},
+{"text":"FM2.3.1a Momentum and Impulse","brush":"#198A8A","dir":"left","parent":-165,"key":-183,"loc":"-199.929987269315 28.208924283202023"},
+{"text":"FM2.3.2a Hooke's Law, Work, Energy and Power","brush":"#198A8A","dir":"left","parent":-166,"key":-184,"loc":"-285.274225550565 54.20892428320202"},
+{"text":"FM2.3.3a Angular Speed and Radial Acceleration","brush":"#198A8A","dir":"left","parent":-167,"key":-185,"loc":"-147.891901331815 80.20892428320202"},
+{"text":"FM2.3.3b Motion in a Horizontal Circle\n","brush":"#198A8A","dir":"left","parent":-167,"key":-186,"loc":"-147.891901331815 112.78675631445202"},
+{"text":"FM2.3.3c Motion in a Vertical Circle","brush":"#198A8A","dir":"left","parent":-167,"key":-187,"loc":"-147.891901331815 145.36458834570203"},
+{"text":"FM2.3.4a Differentiation and Integration of Vectors","brush":"#198A8A","dir":"left","parent":-168,"key":-188,"loc":"-292.218561488065 171.36458834570203"},
+{"text":"FM2.4.1 Complex Numbers","brush":"#B6217B","dir":"left","parent":-27,"key":-189,"loc":"-26.153422908993093 208.90734703421003"},
+{"text":"FM2.4.2 Further Trigonometry","brush":"#B6217B","dir":"left","parent":-27,"key":-190,"loc":"-26.153422908993093 234.90734703421003"},
+{"text":"FM2.4.3 Matrices","brush":"#B6217B","dir":"left","parent":-27,"key":-191,"loc":"-26.153422908993093 273.90734703421003"},
+{"text":"FM2.4.4 Further Algebra and Functions","brush":"#B6217B","dir":"left","parent":-27,"key":-192,"loc":"-26.153422908993093 325.90734703421003"},
+{"text":"FM2.4.5 Further Calculus","brush":"#B6217B","dir":"left","parent":-27,"key":-193,"loc":"-26.153422908993093 429.90734703421003"},
+{"text":"FM2.4.6 Polar Coordinates","brush":"#B6217B","dir":"left","parent":-27,"key":-194,"loc":"-26.153422908993093 533.90734703421"},
+{"text":"FM2.4.7 Hyperbolic functions","brush":"#B6217B","dir":"left","parent":-27,"key":-195,"loc":"-26.153422908993093 585.90734703421"},
+{"text":"FM2.4.8 Differential equations","brush":"#B6217B","dir":"left","parent":-27,"key":-196,"loc":"-26.153422908993093 637.90734703421"},
+{"text":"FM2.4.1a De Moivre's Theorem","brush":"#B6217B","dir":"left","parent":-189,"key":-197,"loc":"-205.0923877527431 208.90734703421003"},
+{"text":"FM2.4.2a Further Trigonometry","brush":"#B6217B","dir":"left","parent":-190,"key":-198,"loc":"-219.0572315027431 234.90734703421003"},
+{"text":"FM2.4.3a Inverse of a 3 by 3 matrix","brush":"#B6217B","dir":"left","parent":-191,"key":-199,"loc":"-146.5669971277431 260.90734703421003"},
+{"text":"FM2.4.3b Using Matrices to Solve Simultaneous Equations","brush":"#B6217B","dir":"left","parent":-191,"key":-200,"loc":"-146.5669971277431 286.90734703421003"},
+{"text":"FM2.4.4a Maclaurin's Series","brush":"#B6217B","dir":"left","parent":-192,"key":-201,"loc":"-273.0440479089931 312.90734703421003"},
+{"text":"FM2.4.4b Partial Fractions","brush":"#B6217B","dir":"left","parent":-192,"key":-202,"loc":"-273.0440479089931 338.90734703421003"},
+{"text":"FM2.4.5a Infinite integrals","brush":"#B6217B","dir":"left","parent":-193,"key":-203,"loc":"-192.8160205652431 364.90734703421003"},
+{"text":"FM2.4.5b Volumes of Revolution","brush":"#B6217B","dir":"left","parent":-193,"key":-204,"loc":"-192.8160205652431 390.90734703421003"},
+{"text":"FM2.4.5c Mean value of a function","brush":"#B6217B","dir":"left","parent":-193,"key":-205,"loc":"-192.8160205652431 416.90734703421003"},
+{"text":"FM2.4.5d Partial Fractions - integration","brush":"#B6217B","dir":"left","parent":-193,"key":-206,"loc":"-192.8160205652431 442.90734703421003"},
+{"text":"FM2.4.5e Differentiation of inverse trig functions","brush":"#B6217B","dir":"left","parent":-193,"key":-207,"loc":"-192.8160205652431 468.90734703421003"},
+{"text":"FM2.4.5f Integrate using trig functions","brush":"#B6217B","dir":"left","parent":-193,"key":-208,"loc":"-192.8160205652431 494.90734703421003"},
+{"text":"FM2.4.6a Polar Coordinates - basics","brush":"#B6217B","dir":"left","parent":-194,"key":-209,"loc":"-201.5059619714931 520.90734703421"},
+{"text":"FM2.4.6b Polar Coordinates - areas","brush":"#B6217B","dir":"left","parent":-194,"key":-210,"loc":"-201.5059619714931 546.90734703421"},
+{"text":"FM2.4.7a Hyperbolic functions","brush":"#B6217B","dir":"left","parent":-195,"key":-211,"loc":"-214.5059619714931 572.90734703421"},
+{"text":"FM2.4.7b Hyperbolic functions - calculus","brush":"#B6217B","dir":"left","parent":-195,"key":-212,"loc":"-214.5059619714931 598.90734703421"},
+{"text":"FM2.4.8a Further 1st order Differential equations","brush":"#B6217B","dir":"left","parent":-196,"key":-213,"loc":"-219.3428760339931 624.90734703421"},
+{"text":"FM2.4.8b 2nd order Differential equations","brush":"#B6217B","dir":"left","parent":-196,"key":-214,"loc":"-219.3428760339931 650.90734703421"},
+{"text":"FM2.5.1 Samples and Populations","brush":"#B6217B","dir":"left","parent":-28,"key":-215,"loc":"-48.16611822149309 676.90734703421"},
+{"text":"FM2.5.2 Statistical Distributions","brush":"#B6217B","dir":"left","parent":-28,"key":-216,"loc":"-48.16611822149309 702.90734703421"},
+{"text":"FM2.5.3 Hypothesis Testing","brush":"#B6217B","dir":"left","parent":-28,"key":-217,"loc":"-48.16611822149309 728.90734703421"},
+{"text":"FM2.5.4 Estimation","brush":"#B6217B","dir":"left","parent":-28,"key":-218,"loc":"-48.16611822149309 754.90734703421"},
+{"text":"FM2.6.1 Rectilinear motion","brush":"#B6217B","dir":"left","parent":-29,"key":-219,"loc":"-58.29062994024309 780.90734703421"},
+{"text":"FM2.6.2 Momentum and Impulse","brush":"#B6217B","dir":"left","parent":-29,"key":-220,"loc":"-58.29062994024309 806.90734703421"},
+{"text":"FM2.5.1a Estimators","brush":"#B6217B","dir":"left","parent":-215,"key":-221,"loc":"-266.8921924402431 676.90734703421"},
+{"text":"FM2.5.2a Linear combination & Central Limit Theorem","brush":"#B6217B","dir":"left","parent":-216,"key":-222,"loc":"-250.2295947839931 702.90734703421"},
+{"text":"FM2.5.3a Hypothesis testing & signed-rank tests","brush":"#B6217B","dir":"left","parent":-217,"key":-223,"loc":"-228.5713916589931 728.90734703421"},
+{"text":"FM2.5.4a Estimation & Confidence","brush":"#B6217B","dir":"left","parent":-218,"key":-224,"loc":"-180.1514697839931 754.90734703421"},
+{"text":"FM2.6.3 Moments and Centre of Mass","brush":"#B6217B","dir":"left","parent":-29,"key":-225,"loc":"-58.29062994024309 845.90734703421"},
+{"text":"FM2.6.4 Equilibrium of Rigid Bodies","brush":"#B6217B","dir":"left","parent":-29,"key":-226,"loc":"-58.29062994024309 884.90734703421"},
+{"text":"FM2.6.5 Differential Equations","brush":"#B6217B","dir":"left","parent":-29,"key":-227,"loc":"-58.29062994024309 923.90734703421"},
+{"text":"FM2.6.1a Rectilinear calculus","brush":"#B6217B","dir":"left","parent":-219,"key":-228,"loc":"-233.6304736902431 780.90734703421"},
+{"text":"FM2.6.2a Momentum - vectors","brush":"#B6217B","dir":"left","parent":-220,"key":-229,"loc":"-269.0377002527431 806.90734703421"},
+{"text":"FM2.6.3a Centre of mass - particles/uniform lamina","brush":"#B6217B","dir":"left","parent":-225,"key":-230,"loc":"-300.1031299402431 832.90734703421"},
+{"text":"FM2.6.4a Equilibrium of Rigid Bodies","brush":"#B6217B","dir":"left","parent":-226,"key":-231,"loc":"-284.9385791589931 884.90734703421"},
+{"text":"FM2.6.5a Kinematic modelling","brush":"#B6217B","dir":"left","parent":-227,"key":-232,"loc":"-252.9210010339931 910.90734703421"},
+{"text":"FM2.6.3b Centre of mass - rigid bodies","brush":"#B6217B","dir":"left","parent":-225,"key":-233,"loc":"-300.1031299402431 858.90734703421"},
+{"text":"FM2.6.5b Simple Harmonic Motion","brush":"#B6217B","dir":"left","parent":-227,"key":-234,"loc":"-252.9210010339931 936.90734703421"}
+]}
+        </textarea>
+      </div>
+   </body>
+</html>
